@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Wohnungs-Bot – Gegend</title>
+<!--
+  Where an applicant wants to live: Berlin districts, or a circle dragged and
+  sized on the map. Opened two ways and answers both:
+    * in Telegram, as a Mini App -> Telegram.WebApp.sendData(json); the bot
+      reads it as the answer to «أين تريد السكن؟» (src/bot/bot.py)
+    * from the web panel (/area) -> window.opener.postMessage({area: json})
+  The JSON is what src/geo_berlin.parse_area accepts:
+    {"bezirke": ["Neukölln", "Mitte"]}   or   {"lat": .., "lon": .., "km": ..}
+  Holds no data of anybody's: it can live on a public static host.
+-->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#111; --accent:#2481cc; --pick:#2e9d4f; --line:#ddd; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#17212b; --fg:#f5f5f5; --line:#2b3a48; } }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+               font:15px/1.4 system-ui, sans-serif; }
+  body { display:flex; flex-direction:column; }
+  .tabs { display:flex; border-bottom:1px solid var(--line); }
+  .tabs button { flex:1; padding:12px; border:0; background:none; color:inherit;
+                 font:inherit; border-bottom:3px solid transparent; }
+  .tabs button.on { border-color:var(--accent); font-weight:600; }
+  #map { flex:1; }
+  .bar { padding:10px 16px; border-top:1px solid var(--line); display:flex;
+         gap:10px; align-items:center; }
+  #what { flex:1; font-size:14px; }
+  #apply { padding:10px 18px; border:0; border-radius:8px; background:var(--accent);
+           color:#fff; font:inherit; font-weight:600; }
+  #apply:disabled { opacity:.4; }
+  .handle { width:18px; height:18px; border-radius:50%; background:#fff;
+            border:3px solid var(--accent); box-sizing:border-box; }
+</style>
+</head>
+<body>
+<div class="tabs">
+  <button id="t-bez" class="on"></button>
+  <button id="t-kreis"></button>
+</div>
+<div id="map"></div>
+<div class="bar"><div id="what"></div><button id="apply" disabled></button></div>
+<script>
+const LANG = new URLSearchParams(location.search).get("lang") === "de" ? "de" : "ar";
+const T = {
+  ar: { bez: "أحياء", kreis: "دائرة", apply: "اعتماد", none: "اضغط على الأحياء التي تريدها",
+        circle: (km) => `دائرة نصف قطرها ${km} كم — اسحب المركز أو الحافة` },
+  de: { bez: "Bezirke", kreis: "Kreis", apply: "Übernehmen", none: "Tippen Sie die gewünschten Bezirke an",
+        circle: (km) => `Kreis mit ${km} km — Mitte oder Rand ziehen` },
+}[LANG];
+document.documentElement.lang = LANG;
+document.documentElement.dir = LANG === "ar" ? "rtl" : "ltr";
+document.getElementById("t-bez").textContent = T.bez;
+document.getElementById("t-kreis").textContent = T.kreis;
+document.getElementById("apply").textContent = T.apply;
+
+const tg = window.Telegram && Telegram.WebApp && Telegram.WebApp.initData ? Telegram.WebApp : null;
+if (tg) { tg.ready(); tg.expand(); }
+
+const map = L.map("map", { zoomControl: false }).setView([52.515, 13.40], 10);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 18, attribution: "© OpenStreetMap",
+}).addTo(map);
+
+let mode = "bez";
+const picked = new Set();
+const layers = {};
+const style = (name) => picked.has(name)
+  ? { color: "#2e9d4f", weight: 2, fillColor: "#2e9d4f", fillOpacity: 0.45 }
+  : { color: "#2481cc", weight: 1.5, fillOpacity: 0.08 };
+
+fetch("berlin-bezirke.geojson").then(r => r.json()).then(geo => {
+  L.geoJSON(geo, {
+    style: f => style(f.properties.name),
+    onEachFeature: (f, layer) => {
+      const name = f.properties.name;
+      layers[name] = layer;
+      layer.bindTooltip(name, { sticky: true });
+      layer.on("click", () => {
+        if (mode !== "bez") return;
+        picked.has(name) ? picked.delete(name) : picked.add(name);
+        layer.setStyle(style(name));
+        refresh();
+      });
+    },
+  }).addTo(map);
+});
+
+// The circle: a centre to drag and a handle on its edge to size it.
+let km = 3;
+const center = L.latLng(52.515, 13.40);
+const circle = L.circle(center, { radius: km * 1000, color: "#2e9d4f", weight: 2, fillOpacity: 0.15 });
+const icon = L.divIcon({ className: "", html: '<div class="handle"></div>', iconSize: [18, 18] });
+const mid = L.marker(center, { draggable: true, icon });
+const edge = L.marker(center, { draggable: true, icon });
+const edgeAt = () => L.latLng(circle.getLatLng().lat,
+  circle.getLatLng().lng + km / (111.32 * Math.cos(circle.getLatLng().lat * Math.PI / 180)));
+mid.on("drag", e => { circle.setLatLng(e.latlng); edge.setLatLng(edgeAt()); refresh(); });
+edge.on("drag", e => {
+  km = Math.max(0.5, Math.min(40, Math.round(circle.getLatLng().distanceTo(e.latlng) / 100) / 10));
+  circle.setRadius(km * 1000); refresh();
+});
+edge.on("dragend", () => edge.setLatLng(edgeAt()));
+edge.setLatLng(edgeAt());
+
+function setMode(m) {
+  mode = m;
+  document.getElementById("t-bez").classList.toggle("on", m === "bez");
+  document.getElementById("t-kreis").classList.toggle("on", m === "kreis");
+  [circle, mid, edge].forEach(l => m === "kreis" ? l.addTo(map) : l.remove());
+  refresh();
+}
+document.getElementById("t-bez").onclick = () => setMode("bez");
+document.getElementById("t-kreis").onclick = () => setMode("kreis");
+
+function answer() {
+  if (mode === "kreis") {
+    const c = circle.getLatLng();
+    return { lat: +c.lat.toFixed(5), lon: +c.lng.toFixed(5), km };
+  }
+  return picked.size ? { bezirke: [...picked] } : null;
+}
+
+function refresh() {
+  const a = answer();
+  document.getElementById("what").textContent =
+    mode === "kreis" ? T.circle(km) : (picked.size ? [...picked].join("، ") : T.none);
+  document.getElementById("apply").disabled = !a;
+}
+
+document.getElementById("apply").onclick = () => {
+  const a = answer();
+  if (!a) return;
+  const json = JSON.stringify(a);
+  if (tg) { tg.sendData(json); return; }          // closes the Mini App itself
+  if (window.opener) { window.opener.postMessage({ area: json }, "*"); window.close(); return; }
+  document.getElementById("what").textContent = json;
+};
+refresh();
+</script>
+</body>
+</html>
