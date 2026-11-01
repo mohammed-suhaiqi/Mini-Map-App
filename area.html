@@ -14,16 +14,18 @@
                font:15px/1.4 system-ui, sans-serif; }
   body { display:flex; flex-direction:column; }
   .tabs { display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line); }
-  .tabs button { flex:1; padding:10px 18px; border:2px solid var(--accent); border-radius:8px;
+  .tabs button { flex:1; padding:10px 12px; border:2px solid var(--accent); border-radius:8px;
                  background:none; color:var(--accent); font:inherit; font-weight:600; cursor:pointer; }
   .tabs button.on { background:var(--accent); color:#fff; }
-  #map { flex:1; }
+  #map { flex:1; touch-action:none; }
+  #map.drawing { cursor:crosshair; }
   .bar { padding:10px 16px; border-top:1px solid var(--line); display:flex;
          gap:10px; align-items:center; }
   #what { flex:1; font-size:14px; font-weight:600; padding:10px 14px; border-radius:8px;
           background:rgba(36,129,204,.12); border:1px solid var(--accent); color:var(--fg); }
-  #apply { padding:10px 18px; border:0; border-radius:8px; background:var(--accent);
+  #apply, #redraw { padding:10px 18px; border:0; border-radius:8px; background:var(--accent);
            color:#fff; font:inherit; font-weight:600; }
+  #redraw { background:none; color:var(--accent); border:2px solid var(--accent); display:none; }
   #apply:disabled { opacity:.4; }
   .handle { width:18px; height:18px; border-radius:50%; background:#fff;
             border:3px solid var(--accent); box-sizing:border-box; }
@@ -33,22 +35,35 @@
 <div class="tabs">
   <button id="t-bez" class="on"></button>
   <button id="t-kreis"></button>
+  <button id="t-shape"></button>
 </div>
 <div id="map"></div>
-<div class="bar"><div id="what"></div><button id="apply" disabled></button></div>
+<div class="bar">
+  <div id="what"></div>
+  <button id="redraw"></button>
+  <button id="apply" disabled></button>
+</div>
 <script>
 const LANG = new URLSearchParams(location.search).get("lang") === "de" ? "de" : "ar";
 const T = {
-  ar: { bez: "أحياء", kreis: "دائرة", apply: "اعتماد", none: "اضغط على الأحياء التي تريدها",
-        circle: (km) => `دائرة نصف قطرها ${km} كم — اسحب المركز أو الحافة` },
-  de: { bez: "Bezirke", kreis: "Kreis", apply: "Übernehmen", none: "Tippen Sie die gewünschten Bezirke an",
-        circle: (km) => `Kreis mit ${km} km — Mitte oder Rand ziehen` },
+  ar: { bez: "أحياء", kreis: "دائرة", shape: "ارسم منطقة", apply: "اعتماد", redraw: "✏️ من جديد",
+        none: "اضغط على الأحياء التي تريدها",
+        circle: (km) => `دائرة نصف قطرها ${km} كم — اسحب المركز أو الحافة`,
+        draw: "ارسم بإصبعك حول المنطقة التي تريدها، بأي شكل",
+        drawn: "هذه منطقتك. اضغط «اعتماد»، أو «من جديد» لترسمها مرة أخرى" },
+  de: { bez: "Bezirke", kreis: "Kreis", shape: "Gebiet zeichnen", apply: "Übernehmen", redraw: "✏️ Neu",
+        none: "Tippen Sie die gewünschten Bezirke an",
+        circle: (km) => `Kreis mit ${km} km — Mitte oder Rand ziehen`,
+        draw: "Zeichnen Sie mit dem Finger um Ihr Wunschgebiet, in beliebiger Form",
+        drawn: "Das ist Ihr Gebiet. Tippen Sie «Übernehmen», oder «Neu» zum Neuzeichnen" },
 }[LANG];
 document.documentElement.lang = LANG;
 document.documentElement.dir = LANG === "ar" ? "rtl" : "ltr";
 document.getElementById("t-bez").textContent = T.bez;
 document.getElementById("t-kreis").textContent = T.kreis;
+document.getElementById("t-shape").textContent = T.shape;
 document.getElementById("apply").textContent = T.apply;
+document.getElementById("redraw").textContent = T.redraw;
 
 const tg = window.Telegram && Telegram.WebApp && Telegram.WebApp.initData ? Telegram.WebApp : null;
 if (tg) { tg.ready(); tg.expand(); }
@@ -99,20 +114,85 @@ edge.on("drag", e => {
 edge.on("dragend", () => edge.setLatLng(edgeAt()));
 edge.setLatLng(edgeAt());
 
+// The drawn shape: one finger (or mouse) stroke around the area. While
+// drawing, the map does not pan; once the stroke ends it can be moved and
+// zoomed again, and «من جديد» draws it over.
+const box = document.getElementById("map");
+const shape = L.polygon([], { color: "#2e9d4f", weight: 2, fillColor: "#2e9d4f", fillOpacity: 0.3 });
+let drawing = false, stroke = null, lastPx = null;
+
+function startDrawing() {
+  drawing = true; stroke = null; lastPx = null;
+  shape.setLatLngs([]);
+  map.dragging.disable(); map.touchZoom.disable(); map.doubleClickZoom.disable();
+  box.classList.add("drawing");
+  refresh();
+}
+function stopDrawing() {
+  drawing = false;
+  map.dragging.enable(); map.touchZoom.enable(); map.doubleClickZoom.enable();
+  box.classList.remove("drawing");
+}
+function pointAt(e) {
+  const r = box.getBoundingClientRect();
+  return L.point(e.clientX - r.left, e.clientY - r.top);
+}
+box.addEventListener("pointerdown", e => {
+  if (mode !== "shape" || !drawing) return;
+  e.preventDefault();
+  box.setPointerCapture(e.pointerId);
+  stroke = []; lastPx = null;
+  addPoint(pointAt(e));
+});
+box.addEventListener("pointermove", e => {
+  if (!stroke) return;
+  e.preventDefault();
+  addPoint(pointAt(e));
+});
+function endStroke() {
+  if (!stroke) return;
+  const points = stroke; stroke = null;
+  if (points.length < 3) { shape.setLatLngs([]); refresh(); return; }
+  // At most 120 corners: Telegram caps what a Mini App may send at 4096 bytes.
+  const step = Math.ceil(points.length / 120);
+  shape.setLatLngs(points.filter((_, i) => i % step === 0));
+  stopDrawing();
+  refresh();
+}
+box.addEventListener("pointerup", endStroke);
+box.addEventListener("pointercancel", endStroke);
+function addPoint(px) {
+  if (lastPx && lastPx.distanceTo(px) < 6) return;
+  lastPx = px;
+  stroke.push(map.containerPointToLatLng(px));
+  shape.setLatLngs(stroke);
+}
+document.getElementById("redraw").onclick = startDrawing;
+
 function setMode(m) {
   mode = m;
   document.getElementById("t-bez").classList.toggle("on", m === "bez");
   document.getElementById("t-kreis").classList.toggle("on", m === "kreis");
+  document.getElementById("t-shape").classList.toggle("on", m === "shape");
   [circle, mid, edge].forEach(l => m === "kreis" ? l.addTo(map) : l.remove());
+  m === "shape" ? shape.addTo(map) : shape.remove();
+  if (m === "shape" && !shape.getLatLngs()[0]?.length) startDrawing();
+  if (m !== "shape" && drawing) stopDrawing();
   refresh();
 }
 document.getElementById("t-bez").onclick = () => setMode("bez");
 document.getElementById("t-kreis").onclick = () => setMode("kreis");
+document.getElementById("t-shape").onclick = () => setMode("shape");
 
 function answer() {
   if (mode === "kreis") {
     const c = circle.getLatLng();
     return { lat: +c.lat.toFixed(5), lon: +c.lng.toFixed(5), km };
+  }
+  if (mode === "shape") {
+    const ring = shape.getLatLngs()[0] || [];
+    return !drawing && ring.length >= 3
+      ? { shape: ring.map(p => [+p.lat.toFixed(5), +p.lng.toFixed(5)]) } : null;
   }
   return picked.size ? { bezirke: [...picked] } : null;
 }
@@ -120,7 +200,10 @@ function answer() {
 function refresh() {
   const a = answer();
   document.getElementById("what").textContent =
-    mode === "kreis" ? T.circle(km) : (picked.size ? [...picked].join("، ") : T.none);
+    mode === "kreis" ? T.circle(km)
+    : mode === "shape" ? (a ? T.drawn : T.draw)
+    : (picked.size ? [...picked].join("، ") : T.none);
+  document.getElementById("redraw").style.display = mode === "shape" && a ? "inline-block" : "none";
   document.getElementById("apply").disabled = !a;
 }
 
