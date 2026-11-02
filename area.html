@@ -65,7 +65,12 @@ document.getElementById("t-shape").textContent = T.shape;
 document.getElementById("apply").textContent = T.apply;
 document.getElementById("redraw").textContent = T.redraw;
 
-const tg = window.Telegram && Telegram.WebApp && Telegram.WebApp.initData ? Telegram.WebApp : null;
+// Inside Telegram? Not by initData: a Mini App opened from a reply-keyboard
+// button -- the bot's map button, the only kind that may sendData -- gets an
+// EMPTY initData, so «اعتماد» took the browser path and sent nothing (2 Nov
+// 2026). Telegram names its platform in the launch URL; a browser is "unknown".
+const W = window.Telegram && Telegram.WebApp;
+const tg = W && (W.initData || (W.platform && W.platform !== "unknown")) ? W : null;
 if (tg) { tg.ready(); tg.expand(); }
 
 const map = L.map("map", { zoomControl: false }).setView([52.515, 13.40], 10);
