@@ -48,12 +48,13 @@ const LANG = new URLSearchParams(location.search).get("lang") === "de" ? "de" : 
 const T = {
   ar: { bez: "أحياء", kreis: "دائرة", shape: "ارسم منطقة", apply: "اعتماد", redraw: "✏️ من جديد",
         none: "اضغط على الأحياء التي تريدها",
-        circle: (km) => `دائرة نصف قطرها ${km} كم — اسحب المركز أو الحافة`,
+        // No radius in words: «13.6 كم» confused clients (the owner, 2 Nov 2026).
+        circle: (km) => "اسحب الدائرة لتحريكها، والنقطة على حافتها لتكبيرها أو تصغيرها",
         draw: "ارسم بإصبعك حول المنطقة التي تريدها، بأي شكل",
         drawn: "هذه منطقتك. اضغط «اعتماد»، أو «من جديد» لترسمها مرة أخرى" },
   de: { bez: "Bezirke", kreis: "Kreis", shape: "Gebiet zeichnen", apply: "Übernehmen", redraw: "✏️ Neu",
         none: "Tippen Sie die gewünschten Bezirke an",
-        circle: (km) => `Kreis mit ${km} km — Mitte oder Rand ziehen`,
+        circle: (km) => "Kreis in der Mitte verschieben, am Punkt auf dem Rand vergrößern oder verkleinern",
         draw: "Zeichnen Sie mit dem Finger um Ihr Wunschgebiet, in beliebiger Form",
         drawn: "Das ist Ihr Gebiet. Tippen Sie «Übernehmen», oder «Neu» zum Neuzeichnen" },
 }[LANG];
